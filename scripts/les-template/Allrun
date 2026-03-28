@@ -1,0 +1,90 @@
+#!/bin/bash
+# 进入当前目录
+cd ${0%/*} || exit 1
+
+# 加载 OpenFOAM 环境函数
+. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions
+
+# 自定义并行运行函数
+runParallel()
+{
+  # local appArgs="-parallel"
+  local appArgs="-parallel -fileHandler collated"
+  local mpirun="mpirun"
+  local appRun="$1"
+  local nProcs=$(getNumberOfProcessors system/decomposeParDict)
+  local appName="${appRun##*/}"
+  local logFile="log.$appName"
+
+  if [ -f "$logFile" ]
+  then
+    echo "$appName already run on $PWD: remove log file to re-run"
+  else
+    echo "Running $appRun ($nProcs processes) on $PWD"
+    $mpirun -n $nProcs $appRun $appArgs </dev/null >> $logFile 2>&1
+  fi
+}
+
+# --- 1. 网格预处理 ---
+
+if [ -f pre-mesh.sh ]; then
+    echo "Processing STL transformations..."
+    sh pre-mesh.sh >> log.pre-mesh 2>&1
+fi
+
+if [ -f system/surfaceFeaturesDict ]; then
+    runApplication surfaceFeatures
+fi
+
+runApplication blockMesh
+runApplication snappyHexMesh -overwrite
+runApplication checkMesh
+
+# --- 2. 初始化与求解 ---
+
+runApplication potentialFoam -writep
+
+N_PROCS=$(getNumberOfProcessors system/decomposeParDict)
+
+if [ "$N_PROCS" -gt 1 ]; then
+  echo "Setting up parallel run for $N_PROCS cores..."
+  # runApplication decomposePar
+  runApplication decomposePar -force -fileHandler collated
+  
+  # 执行并行计算
+  runParallel $(getApplication)
+  
+  # ==========================================================
+  # 【修改后的多进程合并：同时合并多个时间步】
+  # ==========================================================
+#  # 2. 【多进程并行合并】
+  echo "Starting parallel reconstruction..."
+  # 删掉旧的对比文件
+  rm -f merged.txt todo.txt
+  
+  # 获取已合并和待合并的差集
+  foamListTimes > merged.txt
+  foamListTimes -processor | grep -vFf merged.txt > todo.txt
+  
+  # 并行执行合并（这里不使用 runApplication，所以不会被跳过）
+  cat todo.txt | xargs -P 32 -n 1 reconstructPar -fileHandler collated -time
+  
+  rm -f merged.txt todo.txt
+  
+  # 【生成单元中心坐标 C 场】
+  # ==========================================================
+  echo "Generating cell centres (C field) for all time steps..."
+#   # 使用 -fileHandler collated 保持与你其他步骤一致
+  runApplication postProcess -func writeCellCentres -fileHandler collated -time 0.00000
+#   # ==========================================================
+
+  # 计算完且合并完后清理（可选）
+  echo "Cleaning up parallel folders..."
+  rm -rf processor*  
+  
+else
+  echo "Running in serial mode..."
+  runApplication $(getApplication)
+fi
+
+echo "Allrun finished."
