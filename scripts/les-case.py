@@ -38,53 +38,40 @@ def main():
     case_dir = Path(args.case)
     template_dir = Path(__file__).parent / "les-template"
     
-    # 1. 自动确定 patch 名字
-    # 如果路径是 .../data/wings1/case，则 parent.name 是 wings1
     new_patch_name = case_dir.parent.name
     print(f"Detected STL patch name: {new_patch_name}")
 
-    # 初始化目录
     if case_dir.exists():
         shutil.rmtree(case_dir)
     shutil.copytree(template_dir, case_dir)
 
-    # 2. 修改 U 文件 (合并入口速度和障碍物边界设置)
     with edit_openfoam_dict(case_dir / "initial-conditions" / "U") as config:
         bf = config.assignments["boundaryField"]
-        # 设置障碍物边界
         bf[new_patch_name] = { "type": "noSlip" }
-        # 设置入口速度
         bf["inlets"]["value"].value = inflow_velocity
 
-    # 3. 修改 p 文件
     with edit_openfoam_dict(case_dir / "initial-conditions" / "p") as config:
         config.assignments["boundaryField"][new_patch_name] = { "type": "zeroGradient" }
 
-    # 4. 修改 k 文件
     with edit_openfoam_dict(case_dir / "initial-conditions" / "k") as config:
         config.assignments["boundaryField"][new_patch_name] = {
             "type": "kLowReWallFunction",
             "value": "uniform 0.01"
         }
 
-    # 5. 修改 nut 文件
     with edit_openfoam_dict(case_dir / "initial-conditions" / "nut") as config:
         config.assignments["boundaryField"][new_patch_name] = {
             "type": "nutkWallFunction",
             "value": "uniform 0"
         }
-
-    # 6. 修改系统控制文件
     with edit_openfoam_dict(case_dir / "system" / "controlDict") as config:
         config.assignments["endTime"] = end_time
         config.assignments["deltaT"] = delta_t
         config.assignments["writeInterval"] = write_interval
 
-    # 7. 修改并行设置
     with edit_openfoam_dict(case_dir / "system" / "decomposeParDict") as config:
         config.assignments["numberOfSubdomains"] = max(parallel, 1)
 
-    # 将初始条件拷贝到 0 文件夹，供计算使用
     initial_conditions_dir = case_dir / "initial-conditions"
     zero_dir = case_dir / "0.00000"
     if zero_dir.exists():

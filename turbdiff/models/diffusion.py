@@ -21,10 +21,11 @@ from .metrics import (
     SampleStore,
     WassersteinMetric,
     WassersteinTKE,
+    DivergenceMetric,
 )
 from .normalization import Normalization
 from .mesh_encoder import MeshEncoder
-
+from ..metrics import divergence_backward
 log = get_logger()
 
 
@@ -68,8 +69,12 @@ class DiffusionTraining(pl.LightningModule):
         optimizer: str = "adam",
         norm_type: str = "instance",
         with_geometry_embedding: bool = True,
+        with_geometry_encoder: bool = True,
         mesh_embedding_dim: int = 256, 
         mesh_ckpt_path: str = None,
+        use_div_loss: bool = True,
+        lambda_phys: float = 0.01,
+        projection: bool = True,
     ):
         super().__init__()
 
@@ -95,13 +100,20 @@ class DiffusionTraining(pl.LightningModule):
             self.mesh_encoder.load_from_checkpoint(mesh_ckpt_path, device=self.device) 
             for param in self.mesh_encoder.parameters(): 
                 param.requires_grad = False 
-        self.conditioning = Conditioning(self.variables, 
-            self.cell_type_embedding, 
-            self.cell_pos_features, 
-            # None, 
-            self.mesh_encoder, 
-            self.mesh_embedding_dim,
-            )
+        if with_geometry_encoder:
+            self.conditioning = Conditioning(self.variables, 
+                self.cell_type_embedding, 
+                self.cell_pos_features, 
+                self.mesh_encoder, 
+                self.mesh_embedding_dim,
+                )
+        else:
+            self.conditioning = Conditioning(self.variables, 
+                self.cell_type_embedding, 
+                self.cell_pos_features, 
+                None, 
+                self.mesh_embedding_dim,
+                )
         
         self.beta_schedule = beta_schedule
         self.timesteps = timesteps
@@ -117,6 +129,9 @@ class DiffusionTraining(pl.LightningModule):
         self.detach_elbo_mean = detach_elbo_mean
         self.actfn = actfn
         self.optimizer = optimizer
+        self.use_div_loss = use_div_loss
+        self.lambda_phys = lambda_phys
+        self.projection = projection
 
         vars_dim = sum(v.dims for v in self.variables)
 
@@ -143,6 +158,9 @@ class DiffusionTraining(pl.LightningModule):
             learned_variances=learned_variances,
             elbo_weight=elbo_weight,
             detach_elbo_mean=detach_elbo_mean,
+            use_div_loss=use_div_loss,
+            lambda_phys=lambda_phys,
+            projection=projection,
         )
 
         assert V.U in self.variables
@@ -157,13 +175,13 @@ class DiffusionTraining(pl.LightningModule):
         return SampleStore(samples_root / f"{phase}-samples.h5", self.variables)
 
     def _sample_metrics(self, phase: str, data_dir: Path):
-        metrics = [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric()]
+        metrics = [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric(), DivergenceMetric()]
         return SampleMetricsCollection(phase, data_dir, metrics)
 
     def sample(self, batch: OpenFOAMBatch, start_from=None):
         x, C = self._model_input(batch)
         x = self.model.p_sample_loop(
-            x, C, batch.data.cell_idx, pbar=True, start_from=start_from
+            x, C, batch.data.metadata, pbar=True, start_from=start_from
         )
         x = self.normalization.denormalize_grid(x, batch.stats)
         return x

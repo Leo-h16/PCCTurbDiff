@@ -7,10 +7,14 @@ defaults:
 seed: ~
 eval_testset: yes
 
+# Keep experiment-specific directory names in command-line overrides.
+checkpoint_root: ${hydra:runtime.cwd}/checkpoints
+results_dir: ${hydra:runtime.cwd}/results/test_metrics
+
 wandb:
   id: ~
   entity: ~
-  project: turbdifftrain
+  project: metrictest
   group: explore
   mode: ~
   name: ~

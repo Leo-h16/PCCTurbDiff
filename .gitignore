@@ -1,5 +1,4 @@
-# 排除数据文件夹 (非常重要，否则会上传失败)
-data/
+# 排除数据文件夹 
 *.h5
 *.npy
 *.pth
@@ -21,3 +20,10 @@ venv/
 # 排除 IDE 配置文件
 .vscode/
 .idea/
+
+# Jupyter 和系统文件
+.ipynb_checkpoints/
+.DS_Store
+
+# 其他 Python 缓存
+.pytest_cache/

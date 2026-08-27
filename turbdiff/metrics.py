@@ -4,7 +4,7 @@
 
 import numpy as np
 import torch
-
+import torch.nn.functional as F
 
 def centered_difference_derivative(x: torch.Tensor, *, dim: int, h: float):
     """Approximate the first derivative of `x` along `dim` with centered differences.
@@ -93,3 +93,109 @@ def enstrophy(u: torch.Tensor, h: tuple[float, float, float]):
     else:
         dx = np.prod(h)
     return (torch.linalg.norm(curl(u, h), dim=-4, keepdim=True) ** 2) * dx
+
+
+def divergence_same(u, h): 
+    hx, hy, hz = h 
+    u_pad = F.pad(u, (1,1,1,1,1,1), mode="replicate") 
+    ux = u_pad[:, 0, :, :, :] 
+    uy = u_pad[:, 1, :, :, :] 
+    uz = u_pad[:, 2, :, :, :] 
+    ux_x = (ux[:, 2:, 1:-1, 1:-1] - ux[:, :-2, 1:-1, 1:-1]) / (2*hx) 
+    uy_y = (uy[:, 1:-1, 2:, 1:-1] - uy[:, 1:-1, :-2, 1:-1]) / (2*hy) 
+    uz_z = (uz[:, 1:-1, 1:-1, 2:] - uz[:, 1:-1, 1:-1, :-2]) / (2*hz) 
+    return (ux_x + uy_y + uz_z).unsqueeze(1)
+
+
+def divergence_backward(u):
+    """
+    u: (B,3,L,W,H)
+    return: (B,1,L,W,H)
+    """
+    B, _, L, W, H = u.shape
+    div = torch.zeros((B,1,L,W,H), device=u.device)
+
+    ux, uy, uz = u[:,0], u[:,1], u[:,2]
+
+    # x
+    div[:,0,1:,:,:] += ux[:,1:,:,:]
+    div[:,0,1:,:,:] -= ux[:,:-1,:,:]
+
+    # y
+    div[:,0,:,1:,:] += uy[:,:,1:,:]
+    div[:,0,:,1:,:] -= uy[:,:,:-1,:]
+
+    # z
+    div[:,0,:,:,1:] += uz[:,:,:,1:]
+    div[:,0,:,:,1:] -= uz[:,:,:,:-1]
+
+    return div
+
+def gradient_forward(phi):
+    """
+    phi: (B,1,L,W,H)
+    return: (B,3,L,W,H)
+    """
+    B, _, L, W, H = phi.shape
+    grad = torch.zeros((B,3,L,W,H), device=phi.device)
+
+    # x
+    grad[:,0,:-1,:,:] = phi[:,0,1:,:,:] - phi[:,0,:-1,:,:]
+
+    # y
+    grad[:,1,:,:-1,:] = phi[:,0,:,1:,:] - phi[:,0,:,:-1,:]
+
+    # z
+    grad[:,2,:,:,:-1] = phi[:,0,:,:,1:] - phi[:,0,:,:,:-1]
+
+    return grad
+
+def apply_mask_scalar(x, mask):
+    return x * mask
+
+def apply_mask_vector(u, mask):
+    return u * mask
+
+def laplacian(phi):
+    return divergence_backward(gradient_forward(phi))
+
+def poisson_cg_3d(b, mask, max_iters=50, tol=1e-6):
+    """
+    Solve: Δφ = b (only inside mask)
+    """
+    B = b.shape[0]
+
+    # enforce compatibility
+    fluid_sum = mask.sum(dim=(-3,-2,-1), keepdim=True)
+    b_mean = (b * mask).sum(dim=(-3,-2,-1), keepdim=True) / (fluid_sum + 1e-8)
+    b = (b - b_mean) * mask
+
+    phi = torch.zeros_like(b)
+
+    def A(x):
+        return laplacian(x) * mask
+
+    r = b - A(phi)
+    p = r.clone()
+    rho = (r*r).sum(dim=(-3,-2,-1), keepdim=True)
+
+    for _ in range(max_iters):
+        Ap = A(p)
+
+        alpha = rho / ((p*Ap).sum(dim=(-3,-2,-1), keepdim=True) + 1e-10)
+
+        phi = phi + alpha * p
+        phi = phi * mask   # keep inside domain
+
+        r = r - alpha * Ap
+
+        rho_new = (r*r).sum(dim=(-3,-2,-1), keepdim=True)
+
+        if torch.sqrt(rho_new).max() < tol:
+            break
+
+        beta = rho_new / (rho + 1e-10)
+        p = r + beta * p
+        rho = rho_new
+
+    return phi

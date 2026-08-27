@@ -17,7 +17,7 @@ from deadpool import Deadpool
 from pytorch_lightning.utilities import move_data_to_device
 from scipy.special import roots_legendre
 from tqdm import tqdm
-
+import torch.nn.functional as F
 from ..data.ofles import (
     OpenFOAMData,
     OpenFOAMDataRepository,
@@ -26,7 +26,7 @@ from ..data.ofles import (
 )
 from ..data.ofles import Variable as V
 from ..data.ofles import split_channels
-from ..metrics import curl
+from ..metrics import curl, divergence_backward
 from ..utils import get_logger
 from .utils import select_cells
 
@@ -566,7 +566,6 @@ class MaxMeanTKEPositionMetric(nn.Module):
         gt = float(np.load(gt_path))
 
         u_sample = samples.grid_embedding((V.U,))
-
         # Estimating the mean flow is part of the task, so we estimate it from the
         # generated samples instead of using the ground-truth
         u_mean = u_sample.mean(dim=0)
@@ -576,6 +575,48 @@ class MaxMeanTKEPositionMetric(nn.Module):
         u_fluc = u_fluc[..., :, :, 24:]
         tke = 0.5 * (u_fluc**2).sum(dim=-4)
         tke_mean_profile = tke.mean(dim=(1, 2))
+        tke_mean_across_samples = tke_mean_profile.mean(dim=0) + 24
         estimate = tke_mean_profile.argmax(dim=1).float().mean() + 24
 
         return {"max-mean-tke-pos": (gt - estimate) ** 2}
+
+
+class DivergenceMetric(nn.Module):
+
+    def is_expensive(self):
+
+        return False
+    
+    def forward(self, samples, data, stats):
+
+        u_sample = samples.grid_embedding((V.U,))
+        B, _, L, W, H = u_sample.shape
+        device = u_sample.device
+
+        h = float(data.h[0]) if hasattr(data, 'h') else 0.01
+        is_fluid_1d = torch.zeros(L * W * H, device=device, dtype=torch.float32)
+        fluid_indices = data.metadata.cell_idx[data.metadata.cell_type == 0]
+        is_fluid_1d[fluid_indices] = 1.0
+        is_fluid = is_fluid_1d.view(1, 1, L, W, H)
+
+        valid_x = F.pad(is_fluid[:, :, :-1, :, :], (0, 0, 0, 0, 1, 0), value=0.0)
+
+        valid_y = F.pad(is_fluid[:, :, :, :-1, :], (0, 0, 1, 0, 0, 0), value=0.0)
+
+        valid_z = F.pad(is_fluid[:, :, :, :, :-1], (1, 0, 0, 0, 0, 0), value=0.0)
+
+        interior_mask = (is_fluid * valid_x * valid_y * valid_z).bool()
+        interior_mask = interior_mask.expand(B, -1, -1, -1, -1)
+        div = divergence_backward(u_sample) # (B, 1, L, W, H)
+        div_interior = div[interior_mask] / h
+
+        return {
+
+            "div-l1": div_interior.abs().mean(),
+
+            "div-l2": torch.sqrt((div_interior ** 2).mean()),
+
+            "div-max": div_interior.abs().max(),
+
+        } 
+

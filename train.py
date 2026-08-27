@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: MIT
 
 import faulthandler
+import csv
+import json
 import logging
 import math
 import os
@@ -13,23 +15,6 @@ from pathlib import Path
 
 import hydra
 import torch
-
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-
-torch._C._debug_set_autodiff_subgraph_inlining(False)
-
-# 强制禁用所有 fused attention
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["TORCH_USE_CUDA_DSA"] = "1"
-
-torch.backends.cuda.sdp_kernel(enable_flash=False,
-                               enable_math=True,
-                               enable_mem_efficient=False)
-torch.autograd.set_detect_anomaly(True)
-torch.backends.cudnn.benchmark = False
-
 import wandb
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -56,6 +41,7 @@ from turbdiff.utils import (
     print_exceptions,
     set_seed,
 )
+
 
 # Log to traceback to stderr on segfault
 faulthandler.enable(all_threads=False)
@@ -122,7 +108,12 @@ def get_callbacks(config):
         monitor = {}
     callbacks = [
         WandbModelCheckpoint(
-            save_last=True, save_top_k=1, every_n_epochs=1, filename="best", **monitor
+            dirpath=Path(config.checkpoint_root) / f"seed_{config.seed}",
+            save_last=True,
+            save_top_k=1,
+            every_n_epochs=1,
+            filename="best",
+            **monitor,
         ),
         TQDMProgressBar(refresh_rate=1),
         LearningRateMonitor(logging_interval="step"),
@@ -145,12 +136,39 @@ def get_callbacks(config):
     return callbacks
 
 
+def save_test_results(config: DictConfig, test_results: list[dict]):
+    """Store this seed's test metrics and refresh the cross-seed summary files."""
+    results_dir = Path(config.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = {
+        key: float(value.item()) if torch.is_tensor(value) else float(value)
+        for result in test_results
+        for key, value in result.items()
+    }
+    record = {"seed": str(config.seed), **metrics}
+    result_path = results_dir / f"seed_{config.seed}.json"
+    result_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+    records = [json.loads(path.read_text()) for path in sorted(results_dir.glob("seed_*.json"))]
+    (results_dir / "summary.json").write_text(
+        json.dumps(records, indent=2, sort_keys=True) + "\n"
+    )
+    fieldnames = ["seed"] + sorted(
+        {key for item in records for key in item if key != "seed"}
+    )
+    with (results_dir / "summary.csv").open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+    log.info(f"Test results saved to {result_path}")
+
+
 @hydra.main(config_path="config", config_name="train", version_base=None)
 @print_exceptions
 def main(config: DictConfig):
     set_seed(config)
-
-    store_slurm_job_id(config)
 
     # Resolve interpolations to work around a bug:
     # https://github.com/omry/omegaconf/issues/862
@@ -176,29 +194,6 @@ def main(config: DictConfig):
     # submitit handles the requeuing, so we disable pytorch-lightning's SLURM feature
     trainer.signal_connector = Null_SignalConnector(trainer)
 
-    # if config.get("restart_from") is not None:
-    #     log.info(f"Restarting training from {config.restart_from}")
-
-    #     if ":" in config.restart_from:
-    #         run_path, ckpt_name = config.restart_from.split(":")
-    #     else:
-    #         run_path, ckpt_name = config.restart_from, "last.ckpt"
-
-    #     ckpt_root = Path(wandb.run.dir)
-    #     f = wandb.restore(
-    #         f"checkpoints/{ckpt_name}", run_path=run_path, root=str(ckpt_root)
-    #     )
-    #     if f is not None:
-    #         f.close()
-    #         downloaded_path = ckpt_root / "checkpoints" / ckpt_name
-    #         ckpt_path = ckpt_root / "checkpoints" / "start.ckpt"
-    #         downloaded_path.rename(ckpt_path)
-    #     else:
-    #         log.error("Could not download checkpoint!")
-    #         return 1
-    # else:
-    #     ckpt_path = None
-
     if config.get("restart_from") is not None:
         log.info(f"Restarting training from {config.restart_from}")
         ckpt_path = config.restart_from
@@ -210,10 +205,13 @@ def main(config: DictConfig):
     
     if config.eval_testset:
         log.info("Starting testing!")
-        trainer.test(ckpt_path="best", datamodule=datamodule)
+        test_results = trainer.test(ckpt_path="best", datamodule=datamodule)
+        if trainer.global_rank == 0:
+            save_test_results(config, test_results)
 
-    wandb.finish()
-    log.info(f"Best checkpoint path:\n{trainer.checkpoint_callback.best_model_path}")
+    # wandb.finish()
+    if trainer.global_rank == 0:
+        log.info(f"Best checkpoint path:\n{trainer.checkpoint_callback.best_model_path}")
 
     best_score = trainer.checkpoint_callback.best_model_score
     return float(best_score) if best_score is not None else None

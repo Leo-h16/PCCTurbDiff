@@ -97,8 +97,12 @@ def instantiate_data_and_task(config: DictConfig):
             optimizer=config.model.optimizer,
             norm_type=config.model.norm_type,
             with_geometry_embedding=config.model.with_geometry_embedding,
+            with_geometry_encoder=config.model.with_geometry_encoder,
             mesh_embedding_dim = config.model.mesh_embedding_dim,
             mesh_ckpt_path = Path(config.model.mesh_ckpt_path),
+            projection = config.model.projection,
+            use_div_loss = config.model.use_div_loss,
+            lambda_phys = config.model.lambda_phys,
         )
     elif config.model.name == "tfnet":
         if config.model.variables is None:

@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: MIT
 
 import argparse
+import csv
+import json
 import logging
 import sys
 from pathlib import Path
@@ -22,11 +24,50 @@ from turbdiff.utils.seed import manual_seed
 log = logging.getLogger(__name__)
 
 
+def save_metrics(results_dir, seed, ckpt_path, log_metrics):
+    """Save one evaluation and refresh summaries of all evaluations in the dir."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "seed": str(seed),
+        "checkpoint": str(Path(ckpt_path).resolve()),
+        **log_metrics,
+    }
+    result_path = results_dir / f"seed_{seed}.json"
+    result_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+    records = [
+        json.loads(path.read_text())
+        for path in sorted(results_dir.glob("seed_*.json"))
+    ]
+    (results_dir / "summary.json").write_text(
+        json.dumps(records, indent=2, sort_keys=True) + "\n"
+    )
+    fieldnames = ["seed", "checkpoint"] + sorted(
+        {
+            key
+            for record in records
+            for key in record
+            if key not in {"seed", "checkpoint"}
+        }
+    )
+    with (results_dir / "summary.csv").open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+    return result_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a checkpoint with overrides")
     parser.add_argument("--expensive", action="store_true", default=False)
     parser.add_argument("-d", "--device", default="cuda")
     parser.add_argument("-s", "--seed", default=2883413570083077179, type=int)
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="Directory for per-seed metrics and combined summary files",
+    )
     parser.add_argument("ckpt", help="Path to .ckpt file")
     parser.add_argument("samples_path", help=".h5 file for storing samples")
     parser.add_argument("overrides", nargs="*")
@@ -60,7 +101,6 @@ def main():
     datamodule, task = instantiate_data_and_task(config)
     task.load_state_dict(ckpt["state_dict"])
     task = task.to(device)
-
     datamodule.setup("test")
 
     sample_store = SampleStore(samples_path, task.variables)
@@ -80,6 +120,10 @@ def main():
     for key in sorted(log_metrics.keys()):
         value = log_metrics[key]
         print(f"{key}: {value}")
+
+    if args.results_dir is not None:
+        result_path = save_metrics(args.results_dir, seed, ckpt_path, log_metrics)
+        print(f"Metrics saved to {result_path}")
 
 
 if __name__ == "__main__":

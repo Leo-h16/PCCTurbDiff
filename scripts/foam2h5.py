@@ -29,14 +29,12 @@ def isfloat(s):
 
 def parallel_read(case_dir: Path, time_dirs: list[str], field_name: str, dtype: np.dtype):
     def read_and_convert(time_dir: str):
-        # 修改点 1: 捕获文件未找到错误
         try:
             return ff.readfield(
                 case_dir, time_dir, field_name, verbose=False, precision=100
             ).astype(dtype)
         except FileNotFoundError:
-            # 打印未找到的完整路径
-            print(f"\n[跳过] 未找到文件或目录: {case_dir / time_dir / field_name}")
+            print(f"\nSkip Not Found: {case_dir / time_dir / field_name}")
             return None
 
     return Parallel(return_as="generator")(
@@ -58,7 +56,6 @@ def stream_to_h5(
         total=n_times,
         desc=name,
     ):
-        # 修改点 2: 如果读取结果为 None（即触发了 pass 逻辑），则跳过本次写入
         if field is None:
             continue
             
@@ -121,14 +118,12 @@ def main():
     times = np.array(list(map(float, time_dirs)), dtype=np.float32)
 
     try:
-        # 注意：这里路径必须传 case_dir_str (根目录)
-        # fluidfoam 会自动根据 FOAM_FILE_HANDLER 钻进 processors64 寻找
         c_field = ff.readvector(str(case_dir), zero_time_str, name='C', verbose=False)
-        cell_centres = c_field.T.astype(np.float32) # 转置为 (N, 3)
+        cell_centres = c_field.T.astype(np.float32)
         n_cells = cell_centres.shape[0]
-        print(f"成功读取网格坐标，单元总数: {n_cells}")
+        print(f"Total Cells: {n_cells}")
     except Exception as e:
-        print(f"错误: 无法在 {str(case_dir)} 读取 C 场 ({e})")
+        print(f"Error: Cannot read field C from {str(case_dir)} ({e})")
         return
     ################################
     # Read the boundary conditions #
@@ -149,10 +144,8 @@ def main():
             elif desc["type"] == "noSlip":
                 bc[name] = {"type": "fixed-value", "value": [0, 0, 0]}
             elif desc["type"] == "kLowReWallFunction":
-                # 提取 uniform 0.01 中的 0.01
                 bc[name] = {"type": "wall-function", "value": desc["value"].value}
             elif desc["type"] == "nutkWallFunction":
-                # 提取 uniform 0 中的 0
                 bc[name] = {"type": "wall-function", "value": desc["value"].value}
             else:
                 raise RuntimeError(

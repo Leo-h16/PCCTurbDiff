@@ -19,6 +19,7 @@ from .metrics import (
     SampleStore,
     WassersteinMetric,
     WassersteinTKE,
+    DivergenceMetric,
 )
 from .normalization import Normalization
 from .utils import select_cells
@@ -95,7 +96,7 @@ class RegressionTraining(pl.LightningModule):
         return SampleStore(samples_root / f"{phase}-samples.h5", self.variables)
 
     def _sample_metrics(self, phase: str, data_dir: Path):
-        metrics = [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric()]
+        metrics = [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric(), DivergenceMetric()]
         return SampleMetricsCollection(phase, data_dir, metrics)
 
     def unroll_samples(

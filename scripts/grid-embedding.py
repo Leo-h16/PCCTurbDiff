@@ -30,19 +30,15 @@ def main():
         n_times = u_ds.shape[0]
         p_min, p_max = c_pos.min(axis=0), c_pos.max(axis=0)
 
-        # 1. 生成均匀网格点坐标
         xi = np.linspace(p_min[0], p_max[0], unpadded_counts[0])
         yi = np.linspace(p_min[1], p_max[1], unpadded_counts[1])
         zi = np.linspace(p_min[2], p_max[2], unpadded_counts[2])
         gx, gy, gz = np.meshgrid(xi, yi, zi, indexing='ij')
         grid_points = np.c_[gx.ravel(), gy.ravel(), gz.ravel()]
 
-        # 2. 重采样映射 (处理加密网格)
         print("KDTree: Mapping refined mesh to uniform grid...")
         tree = KDTree(c_pos)
         d, tree_indices = tree.query(grid_points)
-        
-        # 3. 计算 1D 全索引和几何掩码
         local_coords = np.stack(np.meshgrid(
             np.arange(unpadded_counts[0]),
             np.arange(unpadded_counts[1]),
@@ -55,7 +51,6 @@ def main():
             dims=tuple(cell_counts)
         )
 
-        # 几何掩码 (圆柱体外 = 0)
         rad_sq = (gx.ravel() / (bbox[0]*0.5))**2 + (gy.ravel() / (bbox[1]*0.5))**2
         mask_wall = (rad_sq <= 1.0).astype(np.float32)
 
@@ -82,7 +77,6 @@ def main():
         cell_type = np.select(condlist, choicelist, default=0)
 
 
-        # 4. 存储元数据
         if "geometry" in f: del f["geometry"]
         geo = f.create_group("geometry")
         geo["bounding_box"], geo["cell_counts"] = bbox, unpadded_counts
@@ -99,7 +93,6 @@ def main():
         ds_n = data.create_dataset("nut", (n_times, n_total_geometry), dtype='f4')
 
         for t in tqdm(range(n_times), desc="Voxelizing to 1D"):
-            # 采样原始加密网格数据
             ds_u[t] = u_ds[t][tree_indices] * mask_flow[:, None]
             ds_p[t] = p_ds[t][tree_indices] * mask_flow
             ds_k[t] = k_ds[t][tree_indices] * mask_flow

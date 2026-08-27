@@ -1,16 +1,9 @@
-# SPDX-FileCopyrightText: © 2024 Marten Lienen <m.lienen@tum.de>
-# SPDX-License-Identifier: MIT
-
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import shutil
 from typing import List
 
-
-# ----------------------------
-# 数据结构
-# ----------------------------
 
 @dataclass(frozen=True)
 class StlObstacle:
@@ -88,21 +81,18 @@ class ChannelConfig:
 
 
 # ----------------------------
-# snappyHexMesh 生成逻辑（核心修改在这里）
+# snappyHexMesh
 # ----------------------------
 
 def setup_stl_mesh(case_dir: Path, config: ChannelConfig):
     if not config.stl_obstacles:
         return
 
-    # 重要：手动计算 dx 以便 offset 逻辑生效
-    # 对于圆柱，dx 是沿轴向 (L) 的分辨率
     dx = config.h[0] / config.n[0]
     
-    # 确保内部点在圆柱内 (通常是轴线上某一点)
-    loc_x = 0.0  # 放在靠近出口的位置比较稳妥
-    loc_y = 0.0  # 圆柱中心 y=0
-    loc_z = config.h[0] * 0.75  # 圆柱中心 z=0
+    loc_x = 0.0  
+    loc_y = 0.0  
+    loc_z = config.h[0] * 0.75  
 
     tri_surface_dir = case_dir / "constant" / "triSurface"
     tri_surface_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +113,6 @@ def setup_stl_mesh(case_dir: Path, config: ChannelConfig):
         target_z = obs.offset * dx
         scale_val = getattr(obs, 'scale', 1.0)
 
-        # 这里 translate 的 y 和 z 设为 0，因为圆柱中心在原点(0,0)
         transform_cmd = f"scale=({scale_val} {scale_val} {scale_val}), translate=(0 0 {target_z})"
         
         move_cmds.append(
@@ -150,7 +139,7 @@ def setup_stl_mesh(case_dir: Path, config: ChannelConfig):
         }}
 """
 
-    # --- 生成 surfaceFeaturesDict (OF10 严格格式) ---
+    # --- surfaceFeaturesDict (OF10) ---
     stl_list_str = " ".join(stl_names)
     sfe_content = f"""FoamFile
 {{
@@ -166,10 +155,9 @@ includedAngle 150;
 """
     (system_dir / "surfaceFeaturesDict").write_text(sfe_content)
     
-    # 将平移和缩放命令写入 pre-mesh.sh
     (case_dir / "pre-mesh.sh").write_text("#!/bin/sh\n" + "\n".join(move_cmds))
 
-    # --- 生成 snappyHexMeshDict (保留了你原始的所有控制参数) ---
+    # --- snappyHexMeshDict  ---
     shm_content = f"""
 FoamFile
 {{
@@ -252,11 +240,10 @@ mergeTolerance 1e-6;
     (system_dir / "snappyHexMeshDict").write_text(shm_content)
 
 # ----------------------------
-# case 生成入口
+# case
 # ----------------------------
 
 def generate_case(path: Path, config: ChannelConfig):
-    # --- 原有逻辑：生成基础 Case ---
     les_cmd = [
         "python", "scripts/les-case.py",
         "--inflow", "0", "0", str(config.inflow),
@@ -268,10 +255,8 @@ def generate_case(path: Path, config: ChannelConfig):
     ]
     subprocess.run(les_cmd, check=True)
 
-    # --- 原有逻辑：生成网格配置 ---
     setup_stl_mesh(path, config)
 
-    # --- 原有逻辑：生成通道配置 ---
     channel_cmd = [
         "python", "scripts/channel-3d.py",
         "-H", *map(str, config.h),
@@ -285,19 +270,16 @@ def generate_case(path: Path, config: ChannelConfig):
     channel_cmd.append(str(path))
     subprocess.run(channel_cmd, check=True)
 
-    # ==========================================================
-    # 核心修改：强制开启 collated 模式
-    # ==========================================================
+
     control_dict_path = path / "system" / "controlDict"
-    
-    # 我们以追加模式写入优化开关
+
     collated_settings = f"""
 // --- Collated File Handler Settings ---
 optimisationSwitches
 {{
     fileHandler     collated;
     maxProcessors   {config.parallel};
-    maxThreadFileBufferSize 2e9; // 2GB 缓冲区，适合 64 核服务器
+    maxThreadFileBufferSize 2e9; 
 }}
 """
     if control_dict_path.exists():

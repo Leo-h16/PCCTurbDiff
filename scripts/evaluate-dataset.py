@@ -21,6 +21,7 @@ from turbdiff.models.metrics import (
     SampleStore,
     WassersteinMetric,
     WassersteinTKE,
+    DivergenceMetric,
 )
 
 
@@ -60,7 +61,7 @@ def main():
     metrics = SampleMetricsCollection(
         "data",
         dataset_dir / "data",
-        [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric()],
+        [WassersteinTKE(), WassersteinMetric(), MaxMeanTKEPositionMetric(), DivergenceMetric()],
     ).to(device)
     stats = move_data_to_device(datamodule.stats, device)
     log_metrics = metrics.compute(

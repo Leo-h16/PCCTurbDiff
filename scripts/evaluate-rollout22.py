@@ -59,8 +59,8 @@ def main():
     task = task.to(device)
 
 
-    manual_seed(817598073042842)  # 固定随机种子
-    torch.set_float32_matmul_precision("high")  # 根据需求调整
+    manual_seed(817598073042842)  
+    torch.set_float32_matmul_precision("high") 
 
     datamodule.setup("test")
     dataset = datamodule.test_dataset
@@ -82,7 +82,6 @@ def main():
                     selected_idxs = random.choices(safe_sample_idxs, k=batch_size)
                     batch = dataset[selected_idxs]
 
-                    # 保留 context window
                     batch.data.t = batch.data.t[:, : task.context_window]
                     batch.data.samples = {
                         v: sample[:, : task.context_window]
@@ -91,19 +90,15 @@ def main():
                     batch = move_data_to_device(batch, device)
 
                     u = batch.data.samples[V.U]
-                    # autoregressive rollout 22 步
                     x_hat = task.unroll_samples(batch, rollout_steps, block_size=25)
 
-                    # 保存样本 X(t+22)
                     sample_store.add_samples(x_hat[:, 0], batch.data.metadata)
 
-    # 计算 metrics
     metrics = task._sample_metrics("test/rollout", data_dir).to(device)
     stats = move_data_to_device(datamodule.stats, device)
     log_metrics = metrics.compute(sample_store, stats, device)
     log_metrics = {key: float(value.item()) for key, value in log_metrics.items()}
 
-    # 保存 metrics
     metrics_path = samples_path.parent / f"{Path(run_path).stem}-metrics.json"
     metrics_path.write_text(json.dumps(log_metrics, indent=4))
 

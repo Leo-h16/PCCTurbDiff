@@ -14,7 +14,8 @@ from einops import rearrange, reduce
 from torch import nn
 from tqdm.auto import tqdm
 
-from turbdiff.metrics import curl, divergence
+import torch.fft as fft
+from turbdiff.metrics import divergence_same, divergence_backward, gradient_forward, poisson_cg_3d
 
 from ..data.ofles import Variable as V
 from ..data.ofles import split_channels
@@ -70,6 +71,33 @@ def unpad(x: torch.Tensor, padding: tuple[int, int, int]):
     else:
         return x
 
+
+def project_div_free_masked(u, metadata):
+    """
+    u: (B,3,L,W,H)
+    """
+
+    B, C, L, W, H = u.shape
+    device = u.device
+
+    div_before = divergence_backward(u)
+    mask = torch.zeros((B, L * W * H), device=device)
+
+    fluid_indices = metadata.cell_idx[(metadata.cell_type == 0)]
+
+    mask[:, fluid_indices] = 1.0
+    mask = mask.view(B, 1, L, W, H)
+
+
+    b = div_before * mask
+
+    phi = poisson_cg_3d(b, mask)
+
+    grad_phi = gradient_forward(phi)
+
+    u_new = u - grad_phi * mask
+    
+    return u_new
 
 class PreNorm(nn.Module):
     def __init__(self, norm: nn.Module, fn: nn.Module, enabled: bool = True):
@@ -631,6 +659,9 @@ class GaussianDiffusion(nn.Module):
         learned_variances: bool = False,
         elbo_weight: float | None = None,
         detach_elbo_mean: bool = True,
+        use_div_loss: bool = True,
+        lambda_phys: float = 0.01,
+        projection: bool = True,
     ):
         super().__init__()
 
@@ -640,7 +671,10 @@ class GaussianDiffusion(nn.Module):
         self.learned_variances = learned_variances
         self.elbo_weight = elbo_weight
         self.detach_elbo_mean = detach_elbo_mean
-
+        self.use_div_loss = use_div_loss
+        self.lambda_phys = lambda_phys
+        self.projection = projection
+        
         if beta_schedule == "linear":
             beta_schedule_fn = linear_beta_schedule
         elif beta_schedule == "log-linear":
@@ -662,7 +696,7 @@ class GaussianDiffusion(nn.Module):
 
         self.num_timesteps = timesteps
         self.loss_type = loss_type
-
+        
         # sampling related parameters
 
         def register_buffer(name, val):
@@ -728,7 +762,7 @@ class GaussianDiffusion(nn.Module):
         posterior_log_var = broadcast_right(self.posterior_log_var[t], x_t)
         return posterior_mean, posterior_log_var
 
-    def model_predictions(self, x_t, t, C, cell_idx, clip_x_start=False):
+    def model_predictions(self, x_t, t, C, metadata, clip_x_start=False):
         model_output = self.model(x_t, t, C)
         if self.learned_variances:
             pred_noise, variance_weights = model_output.chunk(2, dim=1)
@@ -742,14 +776,12 @@ class GaussianDiffusion(nn.Module):
             )
         else:
             pred_noise, log_var = model_output, self.log_betas[t]
-
         x_start = self.predict_start_from_noise(x_t, t, pred_noise)
         if not self.noise_bcs:
-            x_start = where_cells(cell_idx, x_start, x_t)
+            x_start = where_cells(metadata.cell_idx, x_start, x_t)
 
         if clip_x_start:
-            x_start = torch.clamp(x_start, min=-1.0, max=1.0)
-
+            x_start = torch.clamp(x_start, min=-1.0, max=1.0)   
         mean, _ = self.q_posterior(x_start, x_t, t)
 
         return ModelPrediction(
@@ -757,11 +789,11 @@ class GaussianDiffusion(nn.Module):
         )
 
     @torch.no_grad()
-    def p_sample(self, x_t, t: int, C, cell_idx):
+    def p_sample(self, x_t, t: int, C, metadata):
         batch_size = x_t.shape[0]
         batched_times = x_t.new_tensor(t, dtype=torch.long).expand(batch_size)
         pred = self.model_predictions(
-            x_t, batched_times, C, cell_idx, clip_x_start=self.clip_denoised
+            x_t, batched_times, C, metadata, clip_x_start=self.clip_denoised
         )
         return pred.mean, pred.log_var
 
@@ -770,7 +802,7 @@ class GaussianDiffusion(nn.Module):
         self,
         x_bcs,
         C,
-        cell_idx,
+        metadata,
         pbar=False,
         start_from: int | None = None,
     ):
@@ -782,7 +814,7 @@ class GaussianDiffusion(nn.Module):
             )
             x_t = self.q_sample(x_bcs, start_from_, torch.randn_like(x_bcs))
         if not self.noise_bcs:
-            x_t = where_cells(cell_idx, x_t, x_bcs)
+            x_t = where_cells(metadata.cell_idx, x_t, x_bcs)
 
         if start_from is None:
             T = self.num_timesteps
@@ -793,26 +825,48 @@ class GaussianDiffusion(nn.Module):
             ts = tqdm(ts, desc="sampling loop time step", total=T, position=1)
         batch_size = x_t.shape[0]
         for t in ts:
-            mean_tm1, log_var_tm1 = self.p_sample(x_t, t, C, cell_idx)
+            mean_tm1, log_var_tm1 = self.p_sample(x_t, t, C, metadata)
             if t == 0:
                 # Return the mean of the predicted distribution
                 x_t = mean_tm1
             else:
                 noise = torch.randn_like(x_t)
                 if not self.noise_bcs:
-                    noise = where_cells(cell_idx, noise)
+                    noise = where_cells(metadata.cell_idx, noise)
                 std_tm1 = (log_var_tm1 / 2).exp()
-                x_t = mean_tm1 + broadcast_right(std_tm1, noise) * noise
-
+                x_t = mean_tm1 + broadcast_right(std_tm1, noise) * noise 
                 if self.noise_bcs:
                     t_ = x_t.new_tensor(t, dtype=torch.long).expand(batch_size)
                     x_t = where_cells(
-                        cell_idx, x_t, self.q_sample(x_bcs, t_, torch.randn_like(x_bcs))
+                        metadata.cell_idx, x_t, self.q_sample(x_bcs, t_, torch.randn_like(x_bcs))
                     )
-
+        # fluid_indices = metadata.cell_idx[(metadata.cell_type == 0)]
+        # h = 0.1/48
+        # ut_be = x_t[:, 0:3]
+        # div_be  = divergence_backward(ut_be)
+        # div_be  = div_be .reshape(div_be.shape[0], -1)
+        # div_fluid_be  = div_be[:, fluid_indices] / h   
+        # print(f"[before proj] Fluid div L1: {div_fluid_be.abs().mean().item():.6f}")
+        # ==========================================
+        if self.projection:
+            ut = x_t[:, 0:3]
+            ut_proj = project_div_free_masked(ut, metadata)
+            x_t = torch.cat([ut_proj,x_t[:, 3:]],dim=1)
+            # ut_after = x_t[:, 0:3]
+            # div_af = divergence_backward(ut_after)
+            # div_af = div_af.reshape(div_af.shape[0], -1)
+            # div_fluid_af = div_af[:, fluid_indices] / h   
+            # print(f"[after proj] Fluid div L1: {div_fluid_af.abs().mean().item():.6f}")
+                # ==========================================
         # Fix boundary condition values in the end regardless of if we denoised them
-        x_t = where_cells(cell_idx, x_t, x_bcs)
-
+        x_t = where_cells(metadata.cell_idx, x_t, x_bcs)
+        # ut_final = x_t[:, 0:3]
+        # div = divergence_backward(ut_final)
+        # div = div.reshape(div.shape[0], -1)
+        # div_fluid = div[:, fluid_indices] / h
+        
+        # print(f"[Final Generation] Fluid div L1: {div_fluid.abs().mean().item():.6f}")
+        # ==========================================
         return x_t
 
     def q_sample(self, x_start, t, noise):
@@ -840,16 +894,24 @@ class GaussianDiffusion(nn.Module):
         # predict and take gradient step
 
         pred = self.model_predictions(
-            x_t, t, C, metadata.cell_idx, clip_x_start=self.clip_denoised
+            x_t, t, C, metadata, clip_x_start=self.clip_denoised
         )
         simple_loss = self.loss_fn(pred.noise, noise, reduction="none")
-
         # Consider loss only for in-domain cells
         simple_loss = ravel_cells(simple_loss)[..., metadata.cell_idx]
-
         simple_loss = batch_mean(simple_loss)
 
         loss = simple_loss.mean()
+        if self.use_div_loss:
+            u_pred = pred.x_start[:, 0:3, :, :, :]
+            div = divergence_same(u_pred, h=(1.0, 1.0, 1.0))  
+            divergences = ravel_cells(div)[..., metadata.cell_idx]  
+
+            loss_phys = (divergences ** 2).mean()
+
+            weight = 1 - (t.float() / self.num_timesteps).mean()
+            loss = loss + self.lambda_phys * weight * loss_phys
+        
         if self.elbo_weight is not None and self.learned_variances:
             true_mean, true_log_var = self.q_posterior(x_start, x_t, t)
 

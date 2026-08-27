@@ -14,13 +14,15 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 
 class WandbModelCheckpoint(ModelCheckpoint):
-    """Save checkpoints into the W&B run directory to sync them automatically."""
+    """Save checkpoints into the W&B run directory to sync them automatically, or a custom directory."""
 
     def __init__(self, **kwargs):
         run_dir = Path(wandb.run.dir)
-        cp_dir = run_dir / "checkpoints"
+        default_cp_dir = str(run_dir / "checkpoints")
+        
+        custom_dirpath = kwargs.pop("dirpath", default_cp_dir)
 
-        super().__init__(**kwargs, dirpath=str(cp_dir))
+        super().__init__(**kwargs, dirpath=custom_dirpath)
 
 
 class WandbSummaries(pl.Callback):
