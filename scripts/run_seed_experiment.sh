@@ -111,13 +111,18 @@ cd "$PROJECT_ROOT"
 
 if [[ "$MODE" == "all" || "$MODE" == "train" ]]; then
     echo "Training ${#SEED_ARRAY[@]} seeds; checkpoints: $CHECKPOINT_ROOT"
-    CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" python ./train.py -m \
-        "trainer.devices=${#TRAIN_GPU_ARRAY[@]}" \
-        "seed=$SEEDS" \
-        eval_testset=false \
-        "checkpoint_root=$CHECKPOINT_ROOT" \
-        "wandb.name=$EXPERIMENT_NAME-\${seed}" \
-        "${TRAIN_OVERRIDES[@]}"
+    for seed in "${SEED_ARRAY[@]}"; do
+        echo "Training seed $seed"
+        # Use a fresh Python process for every seed. A Hydra multirun would reuse
+        # the process after DDP training and leave torch.distributed initialized.
+        CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" python ./train.py \
+            "trainer.devices=${#TRAIN_GPU_ARRAY[@]}" \
+            "seed=$seed" \
+            eval_testset=false \
+            "checkpoint_root=$CHECKPOINT_ROOT" \
+            "wandb.name=$EXPERIMENT_NAME-$seed" \
+            "${TRAIN_OVERRIDES[@]}"
+    done
 fi
 
 if [[ "$MODE" == "all" || "$MODE" == "eval" ]]; then
