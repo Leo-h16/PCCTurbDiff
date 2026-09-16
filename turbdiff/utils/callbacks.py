@@ -17,10 +17,11 @@ class WandbModelCheckpoint(ModelCheckpoint):
     """Save checkpoints into the W&B run directory to sync them automatically, or a custom directory."""
 
     def __init__(self, **kwargs):
-        run_dir = Path(wandb.run.dir)
-        default_cp_dir = str(run_dir / "checkpoints")
-        
-        custom_dirpath = kwargs.pop("dirpath", default_cp_dir)
+        custom_dirpath = kwargs.pop("dirpath", None)
+        if custom_dirpath is None:
+            if wandb.run is None:
+                raise RuntimeError("W&B must be initialized when dirpath is omitted")
+            custom_dirpath = Path(wandb.run.dir) / "checkpoints"
 
         super().__init__(**kwargs, dirpath=custom_dirpath)
 
@@ -115,6 +116,8 @@ class WandbSummaries(pl.Callback):
         return copy
 
     def _update_summaries(self):
+        if wandb.run is None:
+            return
         # wandb is supposed not to update the summaries anymore once we set them manually,
         # but they are still getting updated, so we make sure to set them after logging
         if self.best_metrics is not None:

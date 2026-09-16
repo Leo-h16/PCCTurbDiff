@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
+import json
 import pickle
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -36,16 +38,31 @@ log = get_logger()
 class SampleStore:
     def __init__(self, samples_file: Path, variables: list[V]):
         super().__init__()
-
-        # This class cannot be used in distributed mode because of the HDF5 file writing
-        assert not (
-            torch.distributed.is_available() and torch.distributed.is_initialized()
-        )
-
-        self.samples_file = samples_file
+        self._samples_file = samples_file
         self.variables = variables
 
-        samples_file.parent.mkdir(parents=True, exist_ok=True)
+        self._samples_file.parent.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def samples_file(self):
+        """Use one HDF5 file per rank to avoid concurrent writes."""
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            return self._samples_file.with_name(
+                f"{self._samples_file.stem}-rank{rank}{self._samples_file.suffix}"
+            )
+        return self._samples_file
+
+    @property
+    def sample_files(self):
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return [
+                self._samples_file.with_name(
+                    f"{self._samples_file.stem}-rank{rank}{self._samples_file.suffix}"
+                )
+                for rank in range(torch.distributed.get_world_size())
+            ]
+        return [self._samples_file]
 
     def add_samples(self, x: torch.Tensor, metadata: OpenFOAMMetadata):
         # Prepare data for writing to HDF5
@@ -89,24 +106,39 @@ class SampleStore:
 
     @property
     def case_names(self):
-        with h5.File(self.samples_file, "r") as f:
-            return list(f.keys())
+        names = set()
+        for samples_file in self.sample_files:
+            if samples_file.is_file():
+                with h5.File(samples_file, "r") as f:
+                    names.update(f.keys())
+        return sorted(names)
 
     def load_samples(self, metadata: OpenFOAMMetadata, *, range=None) -> OpenFOAMData:
         """Load all samples for the case described by the metadata."""
 
-        with h5.File(self.samples_file, "r") as f:
-            data_group = f[metadata.case_name]["data"]
-            samples_v = {}
-            for v in self.variables:
-                dataset = data_group[v.name.lower()]
-                if range is not None:
-                    dataset = dataset[range]
-                samples_v[v] = torch.tensor(np.array(dataset))
-                if samples_v[v].ndim == 2:
-                    # Ensure that we have a batch dimension even if we are loading a
-                    # single sample
-                    samples_v[v] = samples_v[v][None]
+        chunks = {v: [] for v in self.variables}
+        for samples_file in self.sample_files:
+            if not samples_file.is_file():
+                continue
+            with h5.File(samples_file, "r") as f:
+                if metadata.case_name not in f:
+                    continue
+                data_group = f[metadata.case_name]["data"]
+                n_samples = int(data_group.attrs.get("n_samples", 0))
+                for v in self.variables:
+                    values = np.array(data_group[v.name.lower()][:n_samples])
+                    chunks[v].append(torch.tensor(values))
+
+        samples_v = {}
+        for v in self.variables:
+            if not chunks[v]:
+                raise RuntimeError(f"No samples found for {metadata.case_name}")
+            samples_v[v] = torch.cat(chunks[v], dim=0)
+            if range is not None:
+                samples_v[v] = samples_v[v][range]
+            if samples_v[v].ndim == 2:
+                # Ensure that we have a batch dimension even if we load one sample
+                samples_v[v] = samples_v[v][None]
         return OpenFOAMData(metadata, torch.tensor([]), samples_v)
 
     def reset(self):
@@ -190,6 +222,49 @@ class SampleMetricsCollection(nn.Module):
             )
 
         return values
+
+    def compute_distributed(
+        self, sample_store, stats, device, *, sync_key, **kwargs
+    ):
+        """Compute on rank zero while other ranks wait without an NCCL collective."""
+        if not (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        ):
+            return self.compute(sample_store, stats, device, **kwargs)
+
+        rank = torch.distributed.get_rank()
+        safe_key = sync_key.replace("/", "-")
+        sync_file = sample_store._samples_file.with_name(
+            f".{sample_store._samples_file.stem}-{safe_key}-metrics.json"
+        )
+        temporary_file = sync_file.with_suffix(".tmp")
+
+        if rank == 0:
+            sync_file.unlink(missing_ok=True)
+            temporary_file.unlink(missing_ok=True)
+        # This short barrier guarantees that all rank-local sample files are complete
+        # and that no rank can consume a stale metrics file from a resumed run.
+        torch.distributed.barrier()
+
+        if rank == 0:
+            values = self.compute(sample_store, stats, device, **kwargs)
+            payload = {
+                key: float(value.item()) if torch.is_tensor(value) else float(value)
+                for key, value in values.items()
+            }
+            temporary_file.write_text(json.dumps(payload))
+            temporary_file.replace(sync_file)
+        else:
+            deadline = time.monotonic() + 6 * 60 * 60
+            while not sync_file.is_file():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for {sync_file}")
+                time.sleep(0.25)
+            payload = json.loads(sync_file.read_text())
+
+        return {
+            key: torch.tensor(value, device=device) for key, value in payload.items()
+        }
 
     def log_name(self, case: str, metric: str):
         return f"{self.prefix}/{case}/{metric}"
@@ -619,4 +694,3 @@ class DivergenceMetric(nn.Module):
             "div-max": div_interior.abs().max(),
 
         } 
-

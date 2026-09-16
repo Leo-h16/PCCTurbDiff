@@ -166,10 +166,11 @@ class RegressionTraining(pl.LightningModule):
         for s, sample_metrics, store in zip(
             self.sample_steps, self.val_sample_metrics, self.val_sample_stores
         ):
-            step_metrics = sample_metrics.compute(
+            step_metrics = sample_metrics.compute_distributed(
                 store,
                 self.stats,
                 self.device,
+                sync_key=f"val-{s}-epoch-{self.current_epoch}",
                 expensive_metrics=(
                     self.compute_expensive_sample_metrics and final_validation
                 ),
@@ -179,12 +180,12 @@ class RegressionTraining(pl.LightningModule):
             # Log the main step samples as global metrics
             if s == self.main_sample_step:
                 sample_metrics = {
-                    "/".join([(parts := key.split("/"))[0], *parts[2:]]): value
+                    "/".join(key.split("/")[:1] + key.split("/")[2:]): value
                     for key, value in step_metrics.items()
                 }
                 metrics.update(sample_metrics)
 
-        self.log_dict(metrics)
+        self.log_dict(metrics, sync_dist=False)
 
     def test_step(self, batch: OpenFOAMBatch, batch_idx):
         if self.stats is None:
@@ -212,10 +213,11 @@ class RegressionTraining(pl.LightningModule):
         for s, sample_metrics, store in zip(
             self.sample_steps, self.test_sample_metrics, self.test_sample_stores
         ):
-            step_metrics = sample_metrics.compute(
+            step_metrics = sample_metrics.compute_distributed(
                 store,
                 self.stats,
                 self.device,
+                sync_key=f"test-{s}-epoch-{self.current_epoch}",
                 expensive_metrics=self.compute_expensive_sample_metrics,
             )
             metrics.update(step_metrics)
@@ -223,12 +225,12 @@ class RegressionTraining(pl.LightningModule):
             # Log the main step samples as global metrics
             if s == self.main_sample_step:
                 sample_metrics = {
-                    "/".join([(parts := key.split("/"))[0], *parts[2:]]): value
+                    "/".join(key.split("/")[:1] + key.split("/")[2:]): value
                     for key, value in step_metrics.items()
                 }
                 metrics.update(sample_metrics)
 
-        self.log_dict(metrics)
+        self.log_dict(metrics, sync_dist=False)
 
     def _split_x(self, x: torch.Tensor):
         return x[:, : self.context_window], x[:, self.context_window :]

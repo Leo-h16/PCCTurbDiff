@@ -9,6 +9,7 @@ outputs/
 multirun/
 wandb/
 lightning_logs/
+results/
 
 # 排除 Python 缓存和虚拟环境
 __pycache__/

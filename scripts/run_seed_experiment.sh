@@ -102,7 +102,9 @@ if [[ "$MODE" != "all" && "$MODE" != "train" && "$MODE" != "eval" ]]; then
     exit 2
 fi
 
-SAMPLES_ROOT="${SAMPLES_ROOT:-$PROJECT_ROOT/results/$EXPERIMENT_NAME/samples}"
+# SAMPLES_ROOT="${SAMPLES_ROOT:-$PROJECT_ROOT/results/$EXPERIMENT_NAME/samples}"
+# RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results/$EXPERIMENT_NAME/metrics}"
+SAMPLES_ROOT="${SAMPLES_ROOT:-/data1/turbdiff/outputs/$EXPERIMENT_NAME/samples}"
 RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results/$EXPERIMENT_NAME/metrics}"
 IFS=',' read -r -a SEED_ARRAY <<< "$SEEDS"
 IFS=',' read -r -a TRAIN_GPU_ARRAY <<< "$TRAIN_GPUS"

@@ -210,13 +210,14 @@ class DiffusionTraining(pl.LightningModule):
             self.trainer.max_epochs is not None
             and self.current_epoch == self.trainer.max_epochs - 1
         )
-        metrics = self.val_sample_metrics.compute(
+        metrics = self.val_sample_metrics.compute_distributed(
             self.val_sample_store,
             self.stats,
             self.device,
+            sync_key=f"val-epoch-{self.current_epoch}",
             expensive_metrics=final_validation,
         )
-        self.log_dict(metrics)
+        self.log_dict(metrics, sync_dist=False)
 
     def test_step(self, batch: OpenFOAMBatch, batch_idx):
         if self.stats is None:
@@ -231,10 +232,14 @@ class DiffusionTraining(pl.LightningModule):
         self.test_sample_store.reset()
 
     def on_test_epoch_end(self):
-        metrics = self.test_sample_metrics.compute(
-            self.test_sample_store, self.stats, self.device, expensive_metrics=True
+        metrics = self.test_sample_metrics.compute_distributed(
+            self.test_sample_store,
+            self.stats,
+            self.device,
+            sync_key=f"test-epoch-{self.current_epoch}",
+            expensive_metrics=True,
         )
-        self.log_dict(metrics)
+        self.log_dict(metrics, sync_dist=False)
 
     def configure_optimizers(self):
         if self.optimizer == "adam":

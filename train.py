@@ -84,6 +84,11 @@ OmegaConf.register_new_resolver("eval", resolve_eval)
 log = get_logger()
 
 
+def process_is_global_zero():
+    """Return true before Lightning has constructed its distributed strategy."""
+    return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))) == 0
+
+
 def store_slurm_job_id(config: DictConfig):
     array_job_id = os.environ.get("SLURM_ARRAY_JOB_ID")
     array_task_id = os.environ.get("SLURM_ARRAY_TASK_ID")
@@ -173,8 +178,11 @@ def main(config: DictConfig):
     # Resolve interpolations to work around a bug:
     # https://github.com/omry/omegaconf/issues/862
     OmegaConf.resolve(config)
-    wandb.init(**config.wandb, resume=(config.wandb.mode == "online") and "allow")
-    print_config(config)
+    if process_is_global_zero():
+        wandb.init(
+            **config.wandb, resume=(config.wandb.mode == "online") and "allow"
+        )
+        print_config(config)
 
     torch.set_float32_matmul_precision(config.matmul_precision)
     
@@ -186,7 +194,8 @@ def main(config: DictConfig):
         task = torch.compile(task, mode=config.compile)
 
     logger = WandbLogger()
-    log_hyperparameters(logger, config, task)
+    if process_is_global_zero():
+        log_hyperparameters(logger, config, task)
 
     log.info("Instantiating trainer")
     callbacks = get_callbacks(config)
@@ -209,9 +218,9 @@ def main(config: DictConfig):
         if trainer.global_rank == 0:
             save_test_results(config, test_results)
 
-    # wandb.finish()
     if trainer.global_rank == 0:
         log.info(f"Best checkpoint path:\n{trainer.checkpoint_callback.best_model_path}")
+        wandb.finish()
 
     best_score = trainer.checkpoint_callback.best_model_score
     return float(best_score) if best_score is not None else None

@@ -152,12 +152,18 @@ class OpenFOAMPlots(pl.Callback):
         self.data_dir = data_dir
 
     def on_validation_end(self, trainer, task):
-        metrics = self.generate_plots(task, "val")
-        trainer.logger.log_metrics(metrics, step=trainer.global_step)
+        if trainer.world_size > 1:
+            return
+        if trainer.is_global_zero:
+            metrics = self.generate_plots(task, "val")
+            trainer.logger.log_metrics(metrics, step=trainer.global_step)
 
     def on_test_end(self, trainer, task):
-        metrics = self.generate_plots(task, "test")
-        trainer.logger.log_metrics(metrics, step=trainer.global_step)
+        if trainer.world_size > 1:
+            return
+        if trainer.is_global_zero:
+            metrics = self.generate_plots(task, "test")
+            trainer.logger.log_metrics(metrics, step=trainer.global_step)
 
     def generate_plots(self, task, phase: str):
         metrics = {}

@@ -4,7 +4,6 @@
 
 from pathlib import Path
 
-import wandb
 from omegaconf import DictConfig
 from .data.ofles import OpenFOAMDataModule, Variable
 from .data.ofles_seq import OpenFOAMSequenceDataModule
@@ -53,12 +52,11 @@ def instantiate_datamodule(config: DictConfig):
 def instantiate_data_and_task(config: DictConfig):
     datamodule = instantiate_datamodule(config.data)
 
-    if wandb.run is None:
-        samples_root = Path(config.samples_root) / "explore" / "debug"
-    else:
-        samples_root = (
-            Path(config.samples_root) / (wandb.run.group or "explore") / wandb.run.id
-        )
+    # All DDP ranks must derive the same base path before the process group exists.
+    # SampleStore adds a rank suffix once distributed training is initialized.
+    group = config.wandb.group or "explore"
+    run_name = (config.wandb.name or f"seed-{config.seed}").replace("/", "-")
+    samples_root = Path(config.samples_root) / group / run_name
 
     if config.model.name.startswith("diffusion"):
         if config.model.variables is None:
